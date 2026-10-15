@@ -22,16 +22,18 @@ The source repository is private, while this standalone CI repository is public.
 3. Name the secret `SOURCE_REPO_TOKEN` and paste the token.
 4. Open **Actions → PCIe RTL Docker Validation → Run workflow**. Optionally enter a commit SHA or branch for the source ref (default `submission`).
 
+Future runs can also be started by changing `ci/request.txt`: set `source_ref` to `submission` or an exact source commit SHA and change `request_id` to any new value. Commit this change **to this standalone CI repository**, not the Handshake fork. Its push triggers a new Docker validation run, and a `pcie-rtl/docker-preflight` commit status records success/failure for the CI commit so connected GitHub tools can inspect it.
+
 The secret is only supplied to the private-source checkout step, with `persist-credentials: false`. Do not paste tokens into issues, actions logs, or workflow dispatch inputs.
 
 ## When it runs
 
 - Manually using **Run workflow**; choose the source branch or exact SHA.
 - Automatically every six hours against the latest `submission` branch.
-- Whenever the standalone CI workflow or its scripts change on `main`.
+- Whenever `ci/request.txt` or the standalone CI workflow/scripts change on `main`.
 - Via `repository_dispatch` event `validate-rtl`, if you configure an external source-repository trigger later.
 
-**No private RTL, reference solution, test fixtures, expected traces, or raw verification logs are uploaded as artifacts.** Only the checked source SHA and Oracle/Nop pass/fail results are reported in the Actions summary. Keep the CI repo private if you need to preserve even those results.
+**No private RTL, reference solution, test fixtures, expected traces, or raw verification logs are uploaded as artifacts.** Only the checked source SHA and Oracle/Nop pass/fail results are reported in the Actions summary and as a CI commit status. Keep the CI repo private if you need to preserve even those results.
 
 ## Security and limitations
 
