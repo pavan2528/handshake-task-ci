@@ -1,123 +1,128 @@
-name: PCIe RTL Docker Validation
+name: Candidate Task Docker + Harbor Validation
 
 on:
   push:
     branches: [main]
     paths:
-      - '.github/workflows/rtl-ci.yml'
-      - 'scripts/**'
+      - 'tasks/**'
       - 'ci/request.txt'
+      - 'scripts/**'
+      - '.github/workflows/rtl-ci.yml'
   workflow_dispatch:
     inputs:
-      source_ref:
-        description: 'Branch, tag or exact commit SHA in the private source repo'
+      task_path:
+        description: 'Task directory staged within THIS repository'
         required: true
-        default: 'submission'
+        default: 'tasks/pcie-reassembly'
         type: string
   repository_dispatch:
-    types: [validate-rtl]
-  schedule:
-    # Poll the latest private source branch every six hours.
-    - cron: '17 */6 * * *'
+    types: [validate-staged-task]
 
 permissions:
   contents: read
   statuses: write
 
 concurrency:
-  group: pcie-docker-ci-${{ github.ref }}
+  group: stage-docker-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  oracle-and-nop:
-    name: Build Docker + Oracle 2x + Nop 2x
+  validation:
+    name: Staged candidate (Docker, Harbor, Oracle x2, Nop x2)
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 100
     steps:
-      - name: Checkout standalone CI scripts
+      - name: Checkout staged candidate and verifier scripts
         uses: actions/checkout@v4
         with:
           persist-credentials: false
 
-      - name: Validate CI script syntax
-        shell: bash
-        run: |
-          bash -n scripts/verify_pcie.sh
-          echo "Standalone validation script syntax: OK"
-
-      - name: Resolve requested source revision
-        id: source_ref
+      - name: Confirm staging repository is PRIVATE
         shell: bash
         env:
-          EVENT_REF: ${{ github.event.inputs.source_ref || github.event.client_payload.source_ref || '' }}
+          REPO_PRIVATE: ${{ github.event.repository.private }}
         run: |
-          ref="${EVENT_REF}"
-          if [[ -z "${ref}" ]]; then
-            ref="$(sed -n 's/^source_ref=//p' ci/request.txt | head -n 1)"
-          fi
-          if [[ -z "${ref}" ]]; then ref="submission"; fi
-          if [[ ! "${ref}" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,150}$ ]]; then
-            echo "::error::Invalid source branch/tag/SHA in trigger request."
+          if [[ "${REPO_PRIVATE}" != 'true' ]]; then
+            echo "::error::This staging repo is PUBLIC. Make it private before pushing any private task, solution, or verifier. CI will not execute in a public repo."
             exit 1
           fi
-          printf 'value=%s\n' "${ref}" >> "${GITHUB_OUTPUT}"
-          echo "Testing private source ref ${ref}"
+          echo "Verified private staging repository."
 
-      - name: Validate read-only source access
+      - name: Resolve staged task path
+        id: task
+        shell: bash
         env:
-          SOURCE_REPO_TOKEN: ${{ secrets.SOURCE_REPO_TOKEN }}
+          REQUESTED_PATH: ${{ inputs.task_path || github.event.client_payload.task_path || '' }}
+        run: |
+          path="${REQUESTED_PATH}"
+          if [[ -z "${path}" ]]; then
+            path="$(sed -n 's/^task_path=//p' ci/request.txt | head -n 1)"
+          fi
+          if [[ -z "${path}" ]]; then path='tasks/pcie-reassembly'; fi
+          if [[ ! "${path}" =~ ^tasks/[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+            echo "::error::Invalid task_path; use tasks/<task-name>."
+            exit 1
+          fi
+          if [[ ! -f "${path}/task.toml" ]]; then
+            echo "::error::No staged task at ${path}. Stage a complete candidate in THIS private repo first."
+            exit 1
+          fi
+          printf 'path=%s\n' "${path}" >> "${GITHUB_OUTPUT}"
+
+      - name: Lint scripts and record candidate tree
+        env:
+          TASK_PATH: ${{ steps.task.outputs.path }}
         shell: bash
         run: |
-          if [[ -z "${SOURCE_REPO_TOKEN}" ]]; then
-            echo "::error title=Setup needed::Add SOURCE_REPO_TOKEN under Settings > Secrets and variables > Actions. Grant it Contents: Read-only on pavan2528/hardware-rtl-eded247b-089251a8d3fb."
-            exit 1
-          fi
+          bash -n scripts/verify_pcie.sh scripts/verify_harbor.sh
+          python3 - "${TASK_PATH}" <<'PY'
+          import pathlib, sys, tomllib
+          task = pathlib.Path(sys.argv[1])
+          config = tomllib.loads((task/'task.toml').read_text())
+          assert (task/'instruction.md').is_file()
+          assert (task/'solution'/'solve.sh').is_file()
+          assert (task/'tests'/'test.sh').is_file()
+          assert config['task']['name']
+          print('Task schema and required files: OK')
+          PY
+          sha="$(git rev-parse HEAD)"
+          tree="$(git rev-parse "HEAD:${TASK_PATH}")"
+          {
+            echo '### Staged candidate'
+            echo ''
+            printf '%s\n' "Task: ${TASK_PATH}"
+            printf '%s\n' "Staging commit: ${sha}"
+            printf '%s\n' "Exact task tree SHA: ${tree}"
+            echo ''
+            echo 'Promote the same task tree into the target fork only after all checks pass.'
+          } >> "${GITHUB_STEP_SUMMARY}"
 
-      - name: Checkout exact private source revision
-        uses: actions/checkout@v4
+      - name: Docker native image/verifier preflight for PCIe
+        if: steps.task.outputs.path == 'tasks/pcie-reassembly'
+        timeout-minutes: 30
+        shell: bash
+        run: bash scripts/verify_pcie.sh "${GITHUB_WORKSPACE}"
+
+      - name: Install Harbor benchmark CLI
+        uses: astral-sh/setup-uv@v6
         with:
-          repository: pavan2528/hardware-rtl-eded247b-089251a8d3fb
-          ref: ${{ steps.source_ref.outputs.value }}
-          path: task-source
-          token: ${{ secrets.SOURCE_REPO_TOKEN }}
-          persist-credentials: false
-          fetch-depth: 1
+          enable-cache: true
 
-      - name: Identify source snapshot
+      - name: Install and identify Harbor version
+        shell: bash
+        run: |
+          uv tool install harbor
+          harbor --version
+          docker version
+
+      - name: Independent Harbor Oracle x2 and Nop x2
+        timeout-minutes: 65
         shell: bash
         env:
-          SOURCE_REF: ${{ steps.source_ref.outputs.value }}
-        run: |
-          sha="$(git -C task-source rev-parse HEAD)"
-          echo "Checked out source SHA: ${sha}"
-          {
-            echo "### Source revision"
-            echo ""
-            echo "Private source: `pavan2528/hardware-rtl-eded247b-089251a8d3fb`"
-            echo ""
-            echo "Requested ref: ${SOURCE_REF}"
-            echo ""
-            echo "Checked commit: \`${sha}\`"
-            echo ""
-          } >> "${GITHUB_STEP_SUMMARY}"
+          TASK_PATH: ${{ steps.task.outputs.path }}
+        run: bash scripts/verify_harbor.sh "${TASK_PATH}"
 
-      - name: Docker builds, image isolation, Oracle/Nop twice
-        shell: bash
-        timeout-minutes: 35
-        run: |
-          bash scripts/verify_pcie.sh "${GITHUB_WORKSPACE}/task-source"
-
-      - name: Explain official difficulty gate
-        if: always()
-        shell: bash
-        run: |
-          {
-            echo ""
-            echo "Official pass@2 / pass@5 difficulty and implementation rubric are **not available** from this standalone workflow."
-            echo "The upstream Handshake review is required for those checks."
-          } >> "${GITHUB_STEP_SUMMARY}"
-
-      - name: Publish machine-readable CI status
+      - name: Publish queryable staging status
         if: always()
         shell: bash
         env:
@@ -125,10 +130,10 @@ jobs:
           JOB_RESULT: ${{ job.status }}
         run: |
           state=failure
-          if [[ "${JOB_RESULT}" == "success" ]]; then state=success; fi
+          if [[ "${JOB_RESULT}" == 'success' ]]; then state=success; fi
           gh api --method POST "repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
             -f state="${state}" \
-            -f context="pcie-rtl/docker-preflight" \
-            -f description="Oracle 2x / Nop 2x Docker preflight: ${state}" \
+            -f context='task-staging/docker-harbor' \
+            -f description="Staged Docker/Harbor Oracle+Nop: ${state}" \
             -f target_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
             >/dev/null
