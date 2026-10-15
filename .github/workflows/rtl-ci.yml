@@ -1,0 +1,93 @@
+name: PCIe RTL Docker Validation
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/rtl-ci.yml'
+      - 'scripts/**'
+      - 'README.md'
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: 'Branch, tag or exact commit SHA in the private source repo'
+        required: true
+        default: 'submission'
+        type: string
+  repository_dispatch:
+    types: [validate-rtl]
+  schedule:
+    # Poll the source submission branch four times daily without editing it.
+    - cron: '17 */6 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pcie-docker-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  oracle-and-nop:
+    name: Build Docker + Oracle 2x + Nop 2x
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      SOURCE_REF: ${{ github.event.inputs.source_ref || github.event.client_payload.source_ref || 'submission' }}
+    steps:
+      - name: Checkout standalone CI scripts
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Validate read-only source access
+        env:
+          SOURCE_REPO_TOKEN: ${{ secrets.SOURCE_REPO_TOKEN }}
+        shell: bash
+        run: |
+          if [[ -z "${SOURCE_REPO_TOKEN}" ]]; then
+            echo "::error title=Setup needed::Add SOURCE_REPO_TOKEN under Settings > Secrets and variables > Actions. Grant it Contents: Read-only on pavan2528/hardware-rtl-eded247b-089251a8d3fb."
+            exit 1
+          fi
+
+      - name: Checkout exact private source revision
+        uses: actions/checkout@v4
+        with:
+          repository: pavan2528/hardware-rtl-eded247b-089251a8d3fb
+          ref: ${{ env.SOURCE_REF }}
+          path: task-source
+          token: ${{ secrets.SOURCE_REPO_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Identify source snapshot
+        shell: bash
+        run: |
+          sha="$(git -C task-source rev-parse HEAD)"
+          echo "Checked out source SHA: ${sha}"
+          {
+            echo "### Source revision"
+            echo ""
+            echo "Private source: `pavan2528/hardware-rtl-eded247b-089251a8d3fb`"
+            echo ""
+            echo "Requested ref: ${SOURCE_REF}"
+            echo ""
+            echo "Checked commit: \`${sha}\`"
+            echo ""
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Docker builds, image isolation, Oracle/Nop twice
+        shell: bash
+        timeout-minutes: 35
+        run: |
+          bash scripts/verify_pcie.sh "${GITHUB_WORKSPACE}/task-source"
+
+      - name: Explain official difficulty gate
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo ""
+            echo "Official pass@2 / pass@5 difficulty and implementation rubric are **not available** from this standalone workflow."
+            echo "The upstream Handshake review is required for those checks."
+          } >> "${GITHUB_STEP_SUMMARY}"
