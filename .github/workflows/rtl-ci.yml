@@ -39,6 +39,12 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Validate CI script syntax
+        shell: bash
+        run: |
+          bash -n scripts/verify_pcie.sh
+          echo "Standalone validation script syntax: OK"
+
       - name: Resolve requested source revision
         id: source_ref
         shell: bash
