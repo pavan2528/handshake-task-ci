@@ -6,7 +6,7 @@ on:
     paths:
       - '.github/workflows/rtl-ci.yml'
       - 'scripts/**'
-      - 'README.md'
+      - 'ci/request.txt'
   workflow_dispatch:
     inputs:
       source_ref:
@@ -17,11 +17,12 @@ on:
   repository_dispatch:
     types: [validate-rtl]
   schedule:
-    # Poll the source submission branch four times daily without editing it.
+    # Poll the latest private source branch every six hours.
     - cron: '17 */6 * * *'
 
 permissions:
   contents: read
+  statuses: write
 
 concurrency:
   group: pcie-docker-ci-${{ github.ref }}
@@ -32,13 +33,29 @@ jobs:
     name: Build Docker + Oracle 2x + Nop 2x
     runs-on: ubuntu-24.04
     timeout-minutes: 45
-    env:
-      SOURCE_REF: ${{ github.event.inputs.source_ref || github.event.client_payload.source_ref || 'submission' }}
     steps:
       - name: Checkout standalone CI scripts
         uses: actions/checkout@v4
         with:
           persist-credentials: false
+
+      - name: Resolve requested source revision
+        id: source_ref
+        shell: bash
+        env:
+          EVENT_REF: ${{ github.event.inputs.source_ref || github.event.client_payload.source_ref || '' }}
+        run: |
+          ref="${EVENT_REF}"
+          if [[ -z "${ref}" ]]; then
+            ref="$(sed -n 's/^source_ref=//p' ci/request.txt | head -n 1)"
+          fi
+          if [[ -z "${ref}" ]]; then ref="submission"; fi
+          if [[ ! "${ref}" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,150}$ ]]; then
+            echo "::error::Invalid source branch/tag/SHA in trigger request."
+            exit 1
+          fi
+          printf 'value=%s\n' "${ref}" >> "${GITHUB_OUTPUT}"
+          echo "Testing private source ref ${ref}"
 
       - name: Validate read-only source access
         env:
@@ -54,7 +71,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: pavan2528/hardware-rtl-eded247b-089251a8d3fb
-          ref: ${{ env.SOURCE_REF }}
+          ref: ${{ steps.source_ref.outputs.value }}
           path: task-source
           token: ${{ secrets.SOURCE_REPO_TOKEN }}
           persist-credentials: false
@@ -62,6 +79,8 @@ jobs:
 
       - name: Identify source snapshot
         shell: bash
+        env:
+          SOURCE_REF: ${{ steps.source_ref.outputs.value }}
         run: |
           sha="$(git -C task-source rev-parse HEAD)"
           echo "Checked out source SHA: ${sha}"
@@ -91,3 +110,19 @@ jobs:
             echo "Official pass@2 / pass@5 difficulty and implementation rubric are **not available** from this standalone workflow."
             echo "The upstream Handshake review is required for those checks."
           } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Publish machine-readable CI status
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          JOB_RESULT: ${{ job.status }}
+        run: |
+          state=failure
+          if [[ "${JOB_RESULT}" == "success" ]]; then state=success; fi
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            -f state="${state}" \
+            -f context="pcie-rtl/docker-preflight" \
+            -f description="Oracle 2x / Nop 2x Docker preflight: ${state}" \
+            -f target_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            >/dev/null
