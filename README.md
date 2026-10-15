@@ -1,46 +1,56 @@
-# Handshake Task CI
+# Handshake Task Staging CI
 
-An independent GitHub Actions runner for **pavan2528/hardware-rtl-eded247b-089251a8d3fb**. This repository is not a fork, and the workflow **never writes to the source repository**.
+**Private, standalone testing workspace** for developing Handshake tasks before committing them to their corresponding source forks.
 
-## What is tested
+This repository is intentionally **not a fork**. The `submission` branches in the source repositories are never modified by the validation workflow.
 
-- Build the actual agent Docker image and the separate verifier Docker image.
-- Check agent-image isolation: only the task starter RTL appears inside /app.
-- Run the submitted reference/Oracle RTL **twice** under the separate verifier and require reward **1** both times.
-- Run the inert starter/Nop RTL **twice** and require reward **0** both times.
-- Verify the task's TOML metadata and the trace generator are in the source checkout.
-- Fail the GitHub Actions job on a Docker build failure, unexpected reward, or a missing expected artifact.
+## Important: turn this repository PRIVATE before using it
 
-These checks exercise real Icarus Verilog and the task's existing cycle-by-cycle verifier. They are **not** the official Handshake artificiality, implementation-rubric, or pass@2/pass@5 difficulty trials. Those require the upstream Handshake evaluation system and its agent infrastructure.
+This repository was originally created **public**. A Handshake task can contain a private reference solution, hidden tests, and grading traces. **Do not upload these into a public repository.**
 
-## One-time setup: private source access
+First open [repository visibility settings](https://github.com/pavan2528/handshake-task-ci/settings) and change the repository to **Private**. The workflow has a safety gate that refuses to run while this repository is public.
 
-The source repository is private, while this standalone CI repository is public. A workflow token scoped to this CI repository cannot read the private source.
+Neither a `SOURCE_REPO_TOKEN` nor checkout access to the source fork is required by this staging workflow. Staged task code is checked out from **this** repository only.
 
-1. In GitHub, create a **fine-grained personal access token** whose repository access is limited to `pavan2528/hardware-rtl-eded247b-089251a8d3fb`. Grant only **Contents: Read-only** (metadata read is implicit).
-2. In **this CI repository**, open **Settings → Secrets and variables → Actions → New repository secret**.
-3. Name the secret `SOURCE_REPO_TOKEN` and paste the token.
-4. Open **Actions → PCIe RTL Docker Validation → Run workflow**. Optionally enter a commit SHA or branch for the source ref (default `submission`).
+## Intended workflow
 
-Future runs can also be started by changing `ci/request.txt`: set `source_ref` to `submission` or an exact source commit SHA and change `request_id` to any new value. Commit this change **to this standalone CI repository**, not the Handshake fork. Its push triggers a new Docker validation run, and a `pcie-rtl/docker-preflight` commit status records success/failure for the CI commit so connected GitHub tools can inspect it.
+1. Develop and adjust a candidate task independently of the Handshake submission fork.
+2. Copy the **complete** candidate task into `tasks/<task-name>/` **in this private CI repository**. Keep its exact files and relative structure: `task.toml`, `instruction.md`, `environment/`, `solution/`, and `tests/`.
+3. Push/commit to `main` here; that automatically runs **Candidate Task Docker + Harbor Validation**. Alternatively dispatch it manually by giving `tasks/<task-name>`, or change `ci/request.txt` to rerun an existing stage.
+4. GitHub Actions builds/runs the task with Docker and installs the Harbor framework CLI. It checks:
+   - Required task files and TOML parsing.
+   - For `tasks/pcie-reassembly`, the existing agent/verifier Docker image builds, isolation, Oracle twice expecting reward 1, and Nop twice expecting reward 0.
+   - Through `harbor run --path <staged-task> --agent oracle/nop --env docker`, **Oracle twice**, expecting reward **1**, and **Nop twice**, expecting reward **0**.
+   - The workflow fails if any run has a missing result, unexpected reward, simulation error, Docker/Harbor failure, or incorrect stage isolation.
+5. Inspect GitHub Actions and the commit's `task-staging/docker-harbor` status. If any check fails, fix the **staged candidate here**, commit, and repeat. Do **not** update the source fork yet.
+6. Once all checks are green, confirm the stage commit SHA and task **tree SHA** in the summary. Copy **the same task files** (not CI scripts) into the target fork's `submission` branch, then confirm the corresponding Git tree matches.
+7. Push only the verified submission and review the **official Handshake** artificiality, rubric, and difficulty evaluations. The upstream pass@2/pass@5 agent trials are not reproducible merely by running Oracle/Nop in Docker.
 
-The secret is only supplied to the private-source checkout step, with `persist-credentials: false`. Do not paste tokens into issues, actions logs, or workflow dispatch inputs.
+If any post-promotion changes are required, start another staged validation before pushing those changes to submission.
 
-## When it runs
+## How to trigger
 
-- Manually using **Run workflow**; choose the source branch or exact SHA.
-- Automatically every six hours against the latest `submission` branch.
-- Whenever `ci/request.txt` or the standalone CI workflow/scripts change on `main`.
-- Via `repository_dispatch` event `validate-rtl`, if you configure an external source-repository trigger later.
+**On commit:** A change to `tasks/**`, `scripts/**`, `ci/request.txt`, or the workflow on the CI repo's `main` branch starts validation.
 
-**No private RTL, reference solution, test fixtures, expected traces, or raw verification logs are uploaded as artifacts.** Only the checked source SHA and Oracle/Nop pass/fail results are reported in the Actions summary and as a CI commit status. Keep the CI repo private if you need to preserve even those results.
+**Manually:** [Actions → Candidate Task Docker + Harbor Validation](https://github.com/pavan2528/handshake-task-ci/actions/workflows/rtl-ci.yml) → Run workflow → `task_path=tasks/pcie-reassembly` (or another staged task).
 
-## Security and limitations
+**Rerun from connected GitHub tools:** Update `ci/request.txt` with `task_path=tasks/<name>` and a new `request_id`. This triggers Actions without writing to the Handshake fork.
 
-This repository is public. GitHub Actions workflow definitions and summaries are visible publicly. The task RTL and hidden tests are checked out and executed only on the ephemeral GitHub-hosted runner. The verifier runs with `--network none`, and the existing task verifier drops compiler and simulator subprocesses to an unprivileged user.
+## What the pipeline does NOT do
 
-The workflow does not automatically receive the official upstream evaluation results and cannot prove that frontier agents fail pass@2 or pass@5. The CI job remains the local reproducible preflight gate; the official Handshake review is the difficulty gate.
+- It does not download or write the private Handshake source fork.
+- It does not modify the source fork automatically; promotion happens only after the results have been inspected.
+- It does not claim the official Handshake pass@2/pass@5 model-difficulty evaluation has passed.
+- It does not upload the hidden verifier, reference solution, traces or raw Harbor logs as artifacts. Those stay on the ephemeral runner.
 
-## Source task
+## Repo structure
 
-`tasks/pcie-reassembly` in the private source repository; source branch `submission`.
+```text
+.github/workflows/rtl-ci.yml
+scripts/verify_pcie.sh       # PCIe-specific direct Docker preflight
+scripts/verify_harbor.sh      # Harbor Oracle/Nop double gate for staged tasks
+ci/request.txt               # rerun an already-staged task
+tasks/<task-name>/            # populated only AFTER setting repo private
+```
+
+The dedicated staging CI uses GitHub-hosted Ubuntu runners, Docker Engine, Icarus Verilog from the task's verifier image, and the **Harbor agent benchmark framework** installed through `uv tool install harbor`. It is distinct from the Harbor container registry.
