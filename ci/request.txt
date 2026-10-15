@@ -1,0 +1,4 @@
+# Update this file to request a fresh standalone validation run.
+# source_ref can be the private source's submission branch or an exact SHA.
+source_ref=submission
+request_id=bootstrap-001
